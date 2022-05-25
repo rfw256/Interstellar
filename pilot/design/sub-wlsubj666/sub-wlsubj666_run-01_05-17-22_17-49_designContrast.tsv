@@ -1,0 +1,5 @@
+	run	trialNum	decrementStart	decrementStop	responseStop	contrast
+0	1.0	0.0	1351.0	1851.0	2851.0	1.0
+1	1.0	1.0	1606.0	2106.0	3106.0	1.0
+2	1.0	2.0	1968.0	2468.0	3468.0	1.0
+3	1.0	3.0	1911.0	2411.0	3411.0	1.0
