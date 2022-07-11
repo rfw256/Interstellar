@@ -25,7 +25,7 @@ from datetime import datetime
 import imageio
 
 trainParams = {
-    'subject': 99,
+    'subject': 0,
     'run': 0,
     'npos': 16,
     'ntrials': 5,
@@ -35,11 +35,13 @@ trainParams = {
     'time': datetime.now().strftime("%m-%d-%y_%H-%M"),
     'saccadeinput': 'Mouse',
     
-    'distance': 83.5,
-    'width': 64.35,
-    'resolution': [1920, 1080],
+    'monitor': 'drytortugas',
+    
+    'distance': 61,
+    'width': 60,
+    'resolution': [2560, 1440],
     'fullscreen': False,
-    'useretina': False,
+    'useretina': True,
     }
 
 def generate_positions(params):
@@ -51,32 +53,49 @@ def generate_positions(params):
     
     if not op.exists(pa_fname):
         print("Generating new set of positions...")
-        xstart = np.arange(0, 2*np.pi, 2*np.pi / npos)
-        xstop = xstart + 2*np.pi/npos
-        angles = np.random.uniform(xstart, xstop)
-        positions = ecc * np.array([np.sin(angles), np.cos(angles)]).T
-        print(positions.shape)
         
-        cues = os.listdir('../cues')
-        cues = random.sample(cues, npos)
+        task = ['perception', 'ltm', 'wm']
+        positions = []
+        angles = []
+        tasks = []
+        for t in task:
+            xstart = np.arange(0, 2*np.pi, 2*np.pi / npos)
+            xstop = xstart + 2*np.pi/npos
+            A = np.random.uniform(xstart, xstop)
+            P = ecc * np.array([np.sin(A), np.cos(A)]).T
+            T = [t] * npos
+            positions.append(P)
+            angles.append(A)
+            tasks.append(T)
+            
+        angles = np.concatenate(angles)
+        positions = np.concatenate(positions)
+        tasks = np.concatenate(tasks)
+
+        cues = os.listdir('../../cues')
+        cues = random.sample(cues, npos*3)
         
         PA_tsv = pd.DataFrame(data = {
+                                      'task': tasks,
                                       'pos_x': positions[:, 0], 
                                       'pos_y': positions[:, 1], 
                                       'radians': angles, 
                                       'degrees': np.degrees(angles),
-                                      'cues': cues
+                                      'cues': cues,
+                                      'cond': np.arange(npos*3)
                                       })
         PA_tsv.to_csv(pa_fname, sep = '\t', mode='w', header=True)
         
-    else:
-        print("Found previously generated set of positions, loading...")
-        PA_tsv = pd.read_csv(pa_fname, sep = '\t')
-        angles = list(PA_tsv.radians)
-        positions = np.zeros([npos, 2])
-        positions[:, 0] = list(PA_tsv.pos_x)
-        positions[:, 1] = list(PA_tsv.pos_y)
-        cues = list(PA_tsv.cues)
+
+    print("Loading stimuli...")
+    PA_tsv = pd.read_csv(pa_fname, sep = '\t')
+    PA_tsv = PA_tsv[PA_tsv.task == 'ltm']
+    angles = list(PA_tsv.radians)
+    positions = np.zeros([npos, 2])
+    positions[:, 0] = list(PA_tsv.pos_x)
+    positions[:, 1] = list(PA_tsv.pos_y)
+
+    cues = list(PA_tsv.cues)
     
     return positions, angles, cues
     
@@ -89,7 +108,7 @@ def generate_trials(trainParams, positions, angles, cues, win):
     trialdur = trainParams['trialdur']
     time = trainParams['time'],
     ntrials = trainParams['ntrials']
-    
+    conds = np.arange(npos, npos*2)
     
     # Set filenames and paths to be used
     tsv_filename_trial = '/sub-wlsubj%03d_run-%02d_study_%s_trialdesign.tsv' % (subject, run, time[0])
@@ -105,15 +124,19 @@ def generate_trials(trainParams, positions, angles, cues, win):
     
     # Load cue images
     cues_dict = {}
-    for cue_name in cues:
-        cue_path = op.join('../cues', cue_name)
-        cues_dict[cue_name] = visual.ImageStim(win, cue_path, size = 2, units = 'deg')
+    for i, cue_name in enumerate(cues):
+        msg = 'Loading stimuli... \n(%d/%d) %d %%' % (i+1, npos, (i+1) / npos * 100)
+        msg = visual.TextStim(win, pos=[0, 0], text=msg, units = 'deg')
+        msg.draw()
+        win.flip()
+        cue_path = op.join('../../cues', cue_name)
+        cues_dict[cue_name] = visual.ImageStim(win, cue_path, size = 1, units = 'deg')
 
     
     # Initialize dictionaries
     trialParams = {}
     trial_design = pd.DataFrame(columns =         
-        ['run', 'trialNum', 'ITIDur', 'gratingPosX', 'gratingPosY', 'gratingOri', 'gratingAng'])
+        ['run', 'trialNum', 'ITIDur', 'gratingPosX', 'gratingPosY', 'gratingOri', 'gratingAng', 'cue', 'cond'])
 
     # Loop through each trial and generate trial-specific parameters
     for i, trial in enumerate(trialnums):
@@ -121,6 +144,7 @@ def generate_trials(trainParams, positions, angles, cues, win):
         ori = np.degrees(angles[trial]) + 90
         cue_name = cues[trial]
         cue = cues_dict[cue_name]
+        cond = conds[trial]
         
         if ori >= 360: ori -= 360
         
@@ -144,7 +168,8 @@ def generate_trials(trainParams, positions, angles, cues, win):
             'gratingPosY': pos[1],
             'gratingOri': ori,
             'gratingAng': np.degrees(angles[trial]),
-            'cue': cue_name
+            'cue': cue_name,
+            'cond': cond
             }, ignore_index = True)
             
     trial_design.to_csv(subj_dir + tsv_filename_trial, sep = '\t', mode='w', header=True)
@@ -235,7 +260,7 @@ def setup_graphics(el_tracker, params=trainParams):
 #                        monitor=mon,
 #                        allowGUI = True,
 #                        units='deg')
-    mon = monitors.Monitor('testMonitor', distance = params['distance'], width = params['width'])
+    mon = monitors.Monitor(params['monitor'], distance = params['distance'], width = params['width'])
     win = visual.Window(
         params['resolution'], allowGUI=True, monitor=mon, units='deg',
         fullscr = params['fullscreen'])
@@ -449,20 +474,6 @@ def run_trial(trialParams, trial_index, grating, fixation, guide, win, scan_cloc
 
     # send a "TRIALID" message to mark the start of a trial
     el_tracker.sendMessage('TRIALID %d' % trial_index)
-
-    # For illustration purpose,
-    # send interest area messages to record in the EDF data file
-    # here we draw a rectangular IA, for illustration purposes
-    # format: !V IAREA RECTANGLE <id> <left> <top> <right> <bottom> [label]
-    # for all supported interest area commands, see the Data Viewer Manual,
-    # "Protocol for EyeLink Data to Viewer Integration"
-    scn_width, scn_height = win.size
-    left = int(scn_width/2.0) - 50
-    top = int(scn_height/2.0) - 50
-    right = int(scn_width/2.0) + 50
-    bottom = int(scn_height/2.0) + 50
-    ia_pars = (1, left, top, right, bottom, 'screen_center')
-    el_tracker.sendMessage('!V IAREA RECTANGLE %d %d %d %d %d %s' % ia_pars)
     
     # ITI
     print("ITI")
@@ -514,10 +525,10 @@ def run(params=trainParams):
     grating = visual.GratingStim(
         win, sf=2, size=3, mask='gauss', maskParams = {'sd': 5},
         pos=[-4,0], ori=0, units = 'deg')
-    fixation = visual.TextStim(win, text='+', height=2 * factor, 
-                               color=(-1, -1, -1))
-    guide = visual.Circle(win, radius = ecc, lineWidth = 0.5, lineColor = 'white', 
-                          units = 'deg')
+    fixation = visual.TextStim(win, text='+', height=0.5, 
+                               color=(-1, -1, -1), units = 'deg')
+    guide = visual.Circle(win, radius = ecc, lineWidth = 1, lineColor = 'white', 
+                          units = 'deg', fillColor = None, interpolate = True)
                           
     
     # Display instructions
