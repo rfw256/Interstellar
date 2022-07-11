@@ -1,103 +1,70 @@
-from psychopy import core, visual, gui, data, event, monitors
-from psychopy.tools.filetools import fromFile, toFile
-from psychopy.hardware.emulator import launchScan
-from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
-import stat
-import numpy as np
-import random
-import glob
-import pickle
-import warnings
+from __future__ import division
+from __future__ import print_function
+
+import pylink
 import os
-import os.path as op
-import pandas as pd
+import platform
+import random
+import time
+import sys
+from EyeLinkCoreGraphicsPsychoPy import EyeLinkCoreGraphicsPsychoPy
+from psychopy import visual, core, event, monitors, gui, data
 from datetime import date
+from PIL import Image
+from string import ascii_letters, digits
+import os.path as op
+import numpy as np
+import pandas as pd
+from psychopy.tools.filetools import fromFile, toFile
+import pickle
+from psychopy.hardware.emulator import launchScan
 from math import fabs, hypot
+from psychopy.tools.monitorunittools import posToPix, pix2deg
+from datetime import datetime
+import glob
 
-try:
-    import pylink
-except ImportError:
-    warnings.warn("Unable to find pylink, will not be able to collect eye-tracking data")
+# TODO:
+'''
+- change edf name for study and retrieval
+'''
 
 
-# EXPERIMENT PARAMETERS
+# EXPERIMENT PARAMATERS
 expParams = {
     'Subject': 0,
     'Run': 1,
     'saccadeType': ['Saccade', 'No Saccade'],
     'saccadeInput': ['EyeLink', "Mouse"],
-    'expMode': ['Test', 'Scan'],
-    'Output Directory': "/Users/robwoodry/Documents/Research/Interstellar/data",
-    #'Output Directory': "/Users/winawerlab/Experiments/Interstellar/data",
+    'expMode': ['Scan', 'Test'],
+    'use_retina': False,
+    'Full Screen': True,
+    'Debug': False,
+    #'Output Directory': "/Applications/EyeLink/SampleExperiments/Python/examples/Psychopy_examples/interstellar/data",
+    #'Output Directory': "/Users/robwoodry/Documents/Research/Interstellar/data",
+    'Output Directory': "/Users/winawerlab/Experiments/Interstellar/data",
+    #'Output Directory': "/Users/rfw256/Documents/Research/Interstellar/data",
     
     # Parameters below this line will be fixed and uneditable from the dialog
-    'Screen Distance': 68,
-    'Screen Width': 32,
+    'Screen Distance': 83.5,
+    'Screen Width': 64.35,
     'Screen Resolution': [1920, 1080],
     'TR': 1,
-    'volumes': 270,
+    'volumes': 280,
     'skipSync': 3,
     'sync': '5',
     'iti_list': [2.5, 3.5, 4.5, 5.5],
-    'nPositions': 4,
-    'max_decrements': 1,
-    'eccentricity': 7,
-    'trialDuration': 4,
+    'nPositions': 16,
+    'max_decrements': 4,
+    'Contrast': 0.4,
+    'eccentricity': 5,
+    'trialDuration': 11.5,
     'saccadeDuration': 1,
     'decrementDuration': 0.5,
     'responseDuration': 1,
-    'constantContrast': 0.65,
-}
+    'constantContrast': 1
+    }
 
-'''
-TODO:
-- Add feedback to end of trial
-- double check data collection
-- write up tsv variable descriptions and how they are computed
-X Download Eyelink package from SR tools and get pylink to import properly
-- Figure out issue with while loop and timing/refresh rate
-X Add code to create subject data folder if not created
-X Add code to save a session tsv file setting params for trial and contrasts
-X add code that checks to see if file already exists
-- swap mouse input for eyetracker mouse input from psychopy
-- Edit saccade computations accordingly ^
-- Add run column to design files
-'''
-
-'''HELPER FUNCTIONS'''
-def _setup_eyelink(win_size, win):
-    """set up the eyelink eye-tracking
-    """
-
-    # Connect to eyelink
-    eyetracker = pylink.EyeLink('100.1.1.1')
-    genv = EyeLinkCoreGraphicsPsychoPy(eyetracker, win)
-    pylink.openGraphicsEx(genv)
-
-    # Set content of edf file
-    eyetracker.sendCommand('link_sample_data=LEFT,RIGHT,GAZE,AREA')
-    eyetracker.sendCommand('file_sample_data=LEFT,RIGHT,GAZE,AREA,GAZERES,STATUS')
-    eyetracker.sendCommand('file_event_filter=LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON')
-
-    # Set coords
-    eyetracker.sendCommand('screen_pixel_coords=0 0 {} {}'.format(*win_size))
-    eyetracker.sendMessage('DISPLAY_COORDS 0 0 {} {}'.format(*win_size))
-
-    # Calibrate
-    eyetracker.setCalibrationType('HV5')
-    eyetracker.doTrackerSetup(win_size)
-    pylink.closeGraphics()
-
-    return eyetracker
-
-
-def receiveEDF(eyetracker, data_path, subject, run):
-    edf_file = "Is%02dr%02d.edf" % (subject, run)
-    local_edf = os.path.join(data_path, "sub-%03d" % subject, edf_file)
-    print(edf_file, local_edf)
-
-    eyetracker.receiveDataFile(edf_file, local_edf)
-
+# HELPER FUNCTIONS
 def generate_decrements(trialDuration, max_decrements, decrementDuration, responsePeriod, constantContrast = 0):
     # Generate N = max_decrements bins of indices in ms for decrements to possibly start
     bins = np.array_split(np.arange(0, trialDuration*1000 + 1), max_decrements)
@@ -125,87 +92,21 @@ def generate_decrements(trialDuration, max_decrements, decrementDuration, respon
     return decrements, valid_response_periods, contrasts
 
 
-def get_keypress(printkey=False, sync = expParams['sync']):
-    keys = event.getKeys()
-    if keys and keys[0] == 'q':
-        win.close()
-        core.quit()
-    elif keys and keys[0] == sync:
-        if printkey: print("SCANNER PULSE")
-    elif keys and keys[0] != sync:
-        if printkey: print(keys[0])
-        return keys[0]
-    else:
-        return None
-
-
-def saccade_response(parameters, eyetracker, event, fixation, win, globalClock):
-    scn_width, scn_height = win.size
-    
-    if expParams['saccadeType'] == 'Saccade':
-        fixation.color = 'green'
-    else:
-        fixation.color = 'red'
-    
-    saccadeClockStart = globalClock.getTime()
-        
-    # 0- left, 1-right, 2-binocular
-    eye_used = eyetracker.eyeAvailable()
-    if eye_used == 1:
-        eyetracker.sendMessage("EYE_USED 1 RIGHT")
-    elif eye_used == 0 or eye_used == 2:
-        eyetracker.sendMessage("EYE_USED 0 LEFT")
-        eye_used = 0
-    else:
-        print("Error in getting the eye information!")
-        return pylink.TRIAL_ERROR
-
-    got_sac = False 
-    sac_start_time = -1
-    SRT = -1
-    land_err = -1
-    sac = None
-
-    event.clearEvents()
-    fixation.draw()
-    win.flip()
-        
-    while globalClock.getTime() - saccadeClockStart <= parameters['saccadeDuration']:
-        if not got_sac:
-            # Grab events in buffer
-            eye = eyetracker.getNextData()
-            if (eye is not None) and (eye == pylink.ENDSACC):
-                eye_dat = eyetracker.getFloatData()
-                if eye_dat.getEye() == eye_used:
-                    sac_amp = eye_dat.getAmplitude()
-                    sac_start_time = eye_dat.getStartTime()
-                    sac_end_time = eye_dat.getEndTime()
-                    sac_start_pos = eye_dat.getStartGaze()
-                    sac_end_pos = eye_dat.getEndGaze()
-                        
-                    if sac_start_time <= saccadeClockStart:
-                        sac_start_time = -1
-                        pass
-                    elif hypot(sac_amp[0], sac_amp[1]) > 1.5:
-                        offset = int(eyetracker.trackerTime() - sac_start_time)
-                        sac_response_msg = '{} saccade_resp'.format(offset)
-                        eyetracker.sendMessage(sac_response_msg)
-                        SRT = sac_start_time - saccadeClockStart
-                        sac = np.array([sac_x + scn_width/2.0, sac_y + scn_height/2.0])
-                        land_err = np.linalg.norm(sac - parameters['GratingPos'])
-                        got_sac = True
-        else:
-            pass
-    
-    return SRT, sac, land_err       
-
-
 def init_pilot_params(expParams):
+    # Switch to the script folder
+    script_path = os.path.dirname(sys.argv[0])
+    if len(script_path) != 0:
+        os.chdir(script_path)
+    
+    # Get current datetime
+    now = datetime.now()
+    timestr = now.strftime("%m-%d-%y_%H-%M")
+
     # Set filenames and paths to be used
-    tsv_filename_trial = '/sub-%03d_designTrial.tsv' % expParams['Subject']
-    tsv_filename_contrast = '/sub-%03d_designContrast.tsv' % expParams['Subject']
-    pickle_filename = '/sub-%03d_expParams.pickle' % expParams['Subject']
-    subj_dir = op.join('../design/', "sub-%03d" % expParams['Subject'])
+    tsv_filename_trial = '/sub-wlsubj%03d_run-%02d_%s_designTrial.tsv' % (expParams['Subject'], expParams['Run'], timestr)
+    tsv_filename_contrast = '/sub-wlsubj%03d_run-%02d_%s_designContrast.tsv' % (expParams['Subject'], expParams['Run'], timestr)
+    pickle_filename = '/sub-wlsubj%03d_expParams.pickle' % expParams['Subject']
+    subj_dir = op.join('../design/', "sub-wlsubj%03d" % expParams['Subject'])
 
     # If subject directory does not exist, make one
     os.umask(0)
@@ -213,7 +114,6 @@ def init_pilot_params(expParams):
         os.makedirs(subj_dir, mode = 0o777)
     else:
         os.chmod(subj_dir, mode = 0o777)
-        
 
     # If previous params file doesn't already exist in aforementioned directory, 
     # initialize one with new positions
@@ -228,12 +128,10 @@ def init_pilot_params(expParams):
         xstart = np.arange(0, 2*np.pi, 2*np.pi / expParams['nPositions'])
         xstop = xstart + 2*np.pi/expParams['nPositions']
         x = np.random.uniform(xstart, xstop)
-        positions = expParams['eccentricity'] * np.array([np.sin(x), np.cos(x)]).T 
+        positions = expParams['eccentricity'] * np.array([np.cos(x), np.sin(x)]).T 
 
         expParams['Positions'] = positions
         expParams['AnglesRadians'] = x
-        write_mode = 'w'
-        header = True
     
     # If params file already exists, load previous position/angle parameters
     else:
@@ -243,8 +141,6 @@ def init_pilot_params(expParams):
         
         expParams['Positions'] = prevParams['Positions']
         expParams['AnglesRadians'] = prevParams['AnglesRadians']
-        write_mode = 'a'
-        header = False
 
     # Generate randomized trials & itis
     trialnums = list(range(expParams['nPositions']))
@@ -279,13 +175,14 @@ def init_pilot_params(expParams):
         # Save generated trial parameters
         trialParams[str(i)] = {
             'trialNum': str(i),
+            'trialDuration': expParams['trialDuration'],
             'ITIDur': itis[trial],
             'gratingPos': pos,
             'gratingOri': ori,
             'gratingAng': np.degrees(expParams['AnglesRadians'][(expParams["Positions"] == pos)[:, 0]])[0],
             'decrements': decrements,
             'response_periods': response_periods,
-            'contrasts': contrasts,
+            'contrast': expParams['Contrast'],
             'saccadeType': expParams['saccadeType'],
             'saccadeDuration': expParams['saccadeDuration'],
             'saccadeInput': expParams['saccadeInput']
@@ -339,136 +236,290 @@ def init_pilot_params(expParams):
         contrast_design = contrast_design.append(cdf, ignore_index=True)
 
     # Write design dataframes to tsv
-    trial_design.to_csv(subj_dir + tsv_filename_trial, sep = '\t', mode=write_mode, header=header)
-    contrast_design.to_csv(subj_dir + tsv_filename_contrast, sep = '\t', mode=write_mode, header=header)
+    trial_design.to_csv(subj_dir + tsv_filename_trial, sep = '\t', mode = 'w', header=True)
+    contrast_design.to_csv(subj_dir + tsv_filename_contrast, sep = '\t', mode = 'w', header=True)
 
     # Return run trial parameters
-    return trialParams, saccade_data
+    return trialParams, saccade_data, timestr, subj_dir + tsv_filename_trial
 
 
-# Add current time
-expParams['dateStr'] = data.getDateStr()
+def connect_eyelink(expParams):
+    edf_fname = "Is%02d_r%02d" % (expParams['Subject'], expParams['Run'])
+    results_folder = '../results'
+    if not os.path.exists(results_folder):
+        os.makedirs(results_folder)
 
-# Present parameter dialog
-dlg = gui.DlgFromDict(expParams, title = 'Perception Pilot', fixed = [
-    'Screen Distance', 'Screen Width', 'Screen Resolution',
-    'dateStr', 'TR', 'volumes', 'skipSync', 'sync', 'iti_list', 
-    'nPositions', 'max_decrements', 'eccentricity', 'trialDuration',
-    'saccadeDuration', 'decrementDuration', 'responseDuration', 
-    'constantContrast'],
-    order = list(expParams.keys()))
+    session_identifier = "sub-wlsubj%03d" % expParams['Subject']
 
-# INITIALIZE EXPERIMENT
-subject = expParams['Subject']
-subdir = '../data/sub-%03d/' % subject
-dateStr = expParams['dateStr']
-run = expParams['Run']
+    session_folder = os.path.join(results_folder, session_identifier)
+    if not os.path.exists(session_folder):
+        os.makedirs(session_folder)
 
-trialParams, saccade_data = init_pilot_params(expParams)
-contrast_data = {}
-nPressed = -1
+    if expParams['saccadeInput'] == 'Mouse':
+        el_tracker = pylink.EyeLink(None)
+    elif expParams['saccadeInput'] == 'EyeLink':
+        try:
+            el_tracker = pylink.EyeLink("192.168.1.5")
+        except RuntimeError as error:
+            print('ERROR:', error)
+            core.quit()
+            sys.exit()
+    
+    return el_tracker, session_folder
 
-# Save experiment params to file
-if dlg.OK:
-    params_filename = '../design/sub-%03d/sub-%03d_expParams.pickle' % (subject, subject)
-    toFile(params_filename, expParams)
-else:
+
+def create_EDF(expParams, el_tracker):
+    edf_fname = "Is%03dr%02d" % (expParams['Subject'], expParams['Run'])
+    edf_file = edf_fname + ".EDF"
+    print(edf_fname)
+    try:
+        el_tracker.openDataFile(edf_file)
+    except RuntimeError as err:
+        print('ERROR:', err)
+        # close the link if we have one open
+        if el_tracker.isConnected():
+            el_tracker.close()
+        core.quit()
+        sys.exit()
+    
+    preamble_text = 'RECORDED BY %s' % os.path.basename(__file__)
+    el_tracker.sendCommand("add_file_preamble_text '%s'" % preamble_text)
+    
+    return edf_file
+
+
+def configure_eyelink(expParams, el_tracker):
+    el_tracker.setOfflineMode()
+    eyelink_ver = 0  # set version to 0, in case running in Dummy mode
+    if expParams['saccadeInput'] == 'EyeLink':
+        vstr = el_tracker.getTrackerVersionString()
+        eyelink_ver = int(vstr.split()[-1].split('.')[0])
+        print('Running experiment on %s, version %d' % (vstr, eyelink_ver))
+
+    file_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,MESSAGE,BUTTON,INPUT'
+    link_event_flags = 'LEFT,RIGHT,FIXATION,SACCADE,BLINK,BUTTON,FIXUPDATE,INPUT'
+
+    if eyelink_ver > 3:
+        file_sample_flags = 'LEFT,RIGHT,GAZE,HREF,RAW,AREA,HTARGET,GAZERES,BUTTON,STATUS,INPUT'
+        link_sample_flags = 'LEFT,RIGHT,GAZE,GAZERES,AREA,HTARGET,STATUS,INPUT'
+    else:
+        file_sample_flags = 'LEFT,RIGHT,GAZE,HREF,RAW,AREA,GAZERES,BUTTON,STATUS,INPUT'
+        link_sample_flags = 'LEFT,RIGHT,GAZE,GAZERES,AREA,STATUS,INPUT'
+    el_tracker.sendCommand("file_event_filter = %s" % file_event_flags)
+    el_tracker.sendCommand("file_sample_data = %s" % file_sample_flags)
+    el_tracker.sendCommand("link_event_filter = %s" % link_event_flags)
+    el_tracker.sendCommand("link_sample_data = %s" % link_sample_flags)
+
+    el_tracker.sendCommand("calibration_type = HV9")
+    el_tracker.sendCommand("button_function 5 'accept_target_fixation'")
+
+    el_tracker.sendCommand('calibration_area_proportion 0.40 0.80')
+    el_tracker.sendCommand('validation_area_proportion 0.40 0.80')
+    
+    return el_tracker
+
+
+def setup_graphics(expParams, el_tracker):
+#    mon = monitors.Monitor('myMonitor', distance = expParams['Screen Distance'], width = expParams['Screen Width'])
+#    win = visual.Window(expParams['Screen Resolution'],
+#                        fullscr=False,
+#                        monitor=mon,
+#                        allowGUI = True,
+#                        units='deg')
+    mon = monitors.Monitor('propixx', distance = expParams['Screen Distance'], width = expParams['Screen Width'])
+    win = visual.Window(
+        expParams['Screen Resolution'], allowGUI=True, monitor=mon, units='deg',
+        fullscr = expParams['Full Screen'])
+
+    scn_width, scn_height = win.size
+
+    if 'Darwin' in platform.system():
+        if expParams['use_retina']:
+            scn_width = int(scn_width/2.0)
+            scn_height = int(scn_height/2.0)
+
+    el_coords = "screen_pixel_coords = 0 0 %d %d" % (scn_width - 1, scn_height - 1)
+    el_tracker.sendCommand(el_coords)
+
+    dv_coords = "DISPLAY_COORDS  0 0 %d %d" % (scn_width - 1, scn_height - 1)
+    el_tracker.sendMessage(dv_coords)
+
+    genv = EyeLinkCoreGraphicsPsychoPy(el_tracker, win)
+    print(genv) 
+
+    foreground_color = (-1, -1, -1)
+    background_color = win.color
+    genv.setCalibrationColors(foreground_color, background_color)
+
+    genv.setTargetType('picture')
+    genv.setPictureTarget(os.path.join('images', 'fixTarget.bmp'))
+
+    genv.setCalibrationSounds('', '', '')
+
+    if expParams['use_retina']:
+        genv.fixMacRetinaDisplay()
+
+    pylink.openGraphicsEx(genv)
+    
+    print('Size:', win.size)
+    print('Aspect:', win.aspect)
+    print(mon)
+
+    return mon, win, genv
+
+
+def clear_screen(win, genv):
+    """ clear up the PsychoPy window""" 
+
+    win.fillColor = genv.getBackgroundColor()
+    win.flip()
+
+
+def show_msg(win, text, genv, wait_for_keypress=True):
+    """ Show task instructions on screen""" 
+    scn_width, scn_height = win.size
+    msg = visual.TextStim(win, text,
+                          color=genv.getForegroundColor(),
+                          wrapWidth=scn_width/2)
+    clear_screen(win, genv)
+    msg.draw()
+    win.flip()
+
+    # wait indefinitely, terminates upon any key press
+    if wait_for_keypress:
+        event.waitKeys()
+        clear_screen(win, genv)
+
+
+def terminate_task(win, session_folder, edf_file, genv):
+    """ Terminate the task gracefully and retrieve the EDF data file
+
+    file_to_retrieve: The EDF on the Host that we would like to download
+    win: the current window used by the experimental script
+    """
+
+    el_tracker = pylink.getEYELINK()
+
+    if el_tracker.isConnected():
+        # Terminate the current trial first if the task terminated prematurely
+        error = el_tracker.isRecording()
+        if error == pylink.TRIAL_OK:
+            abort_trial(win, genv)
+
+        # Put tracker in Offline mode
+        el_tracker.setOfflineMode()
+
+        # Clear the Host PC screen and wait for 500 ms
+        el_tracker.sendCommand('clear_screen 0')
+        pylink.msecDelay(500)
+
+        # Close the edf data file on the Host
+        el_tracker.closeDataFile()
+
+        # Show a file transfer message on the screen
+        msg = 'EDF data is transferring from EyeLink Host PC...'
+        show_msg(win, msg, genv, wait_for_keypress=False)
+
+        # Download the EDF data file from the Host PC to a local data folder
+        # parameters: source_file_on_the_host, destination_file_on_local_drive
+        local_edf = os.path.join(session_folder, edf_file)
+        try:
+            el_tracker.receiveDataFile(edf_file, local_edf)
+        except RuntimeError as error:
+            print('ERROR:', error)
+
+        # Close the link to the tracker.
+        el_tracker.close()
+
+    # close the PsychoPy window
+    win.close()
+
+    # quit PsychoPy
     core.quit()
-
-# Create window & stimuli
-monitor = monitors.Monitor('testMonitor', distance = expParams['Screen Distance'], width = expParams['Screen Width'])
-win = visual.Window(
-    expParams['Screen Resolution'], allowGUI=True, monitor=monitor, units='deg',
-    fullscr = False)
-
-grating = visual.GratingStim(
-    win, sf=1, size=3, mask='gauss', maskParams = {'sd': 5},
-    pos=[-4,0], ori=0, units = 'deg')
-fixation = visual.GratingStim(
-    win, color=-1, colorSpace='rgb', tex=None, mask='cross', size=0.5)
+    sys.exit()
 
 
-# Eyetracker 
-if expParams['saccadeInput'] == 'EyeLink':
-    edf_name = "Is%02dr%02d.EDF" % (subject, run)
-    print(edf_name)
-    eyetracker = _setup_eyelink(expParams['Screen Resolution'], win)
+def abort_trial(win, genv):
+    """Ends recording """
+
+    el_tracker = pylink.getEYELINK()
+
+    # Stop recording
+    if el_tracker.isRecording():
+        # add 100 ms to catch final trial events
+        pylink.pumpDelay(100)
+        el_tracker.stopRecording()
+
+    # clear the screen
+    clear_screen(win, genv)
+    # Send a message to clear the Data Viewer screen
+    bgcolor_RGB = (116, 116, 116)
+    el_tracker.sendMessage('!V CLEAR %d %d %d' % bgcolor_RGB)
+
+    # send a message to mark trial end
+    el_tracker.sendMessage('TRIAL_RESULT %d' % pylink.TRIAL_ERROR)
+
+    return pylink.TRIAL_ERROR
+
+
+def disp_coords(win, mon, sac_end_pos, grating, retina):
+    scn_width, scn_height = win.size
+    print(win.size)
+    stim_pix = posToPix(grating)
+    if retina:
+        scn_width = int(scn_width/2.0)
+        scn_height = int(scn_height/2.0)
+    sac_pix = [sac_end_pos[0] - scn_width/2, sac_end_pos[1] - scn_height/2]
+    sac_deg = pix2deg(np.asarray(sac_pix), mon)
     
-    eyetracker.openDataFile(edf_name)
-    pylink.flushGetkeyQueue()
-    eyetracker.setOfflineMode()
-    eyetracker.startRecording(1, 1, 1, 1)
+    print("------\nStim Pix:", stim_pix, "Sac Pix:", sac_pix, "\n", "Stim deg:", grating.pos, 
+        "Sac Deg:", sac_deg, "\n------")
+
+
+def run_trial(trial_params, trial_index, scan_clock, contrast_data, win, fixation, 
+    grating, session_folder, edf_file, genv, eye_used, mon, nPressed, guide):
+    parameters = trial_params[str(trial_index)]
     
-elif expParams['saccadeInput'] == 'Mouse':
-    eyetracker = event.Mouse(win=win)
+    if trial_index == 0:
+        start_time = scan_clock.getTime()
+        fixation.mask = 'cross'
+        fixation.color = 'black'
+        fixation.size = 0.5
 
-# Display instructions
-if expParams['saccadeType'] == 'Saccade':
-    instructions = "[PARTICIPANT] Press 1 when you detect a change in contrast. At the end of each trial, make a saccade"
-elif expParams['saccadeInput'] == 'No Saccade':
-    instructions = "[PARTICIPANT] Press 1 when you detect a change in contrast. At the end of each trial, DO NOT make a saccade"
-msg1 = visual.TextStim(win, pos=[0, +3], text='[OPERATOR] Hit 0 key when participant is ready')
-msg2 = visual.TextStim(win, pos=[0, -3],
-text="[PARTICIPANT] Press 1 when you detect a change in contrast. At the end of each trial, ")
+        fixation.draw()
+        guide.draw()
+        win.flip()
+        
+        while scan_clock.getTime() - start_time <= 10:
+            pass
 
-msg1.draw()
-msg2.draw()
-fixation.draw()
-win.flip()
+    # get a reference to the currently active EyeLink connection
+    el_tracker = pylink.getEYELINK()
 
-# Wait for a response
-event.waitKeys(keyList=['0'])
+    # send a "TRIALID" message to mark the start of a trial
+    el_tracker.sendMessage('TRIALID %d' % trial_index)
 
-# Start up some clocks
-globalClock = core.Clock()
-trialClock = core.Clock()
-itiClock = core.Clock()
+    # For illustration purpose,
+    # send interest area messages to record in the EDF data file
+    # here we draw a rectangular IA, for illustration purposes
+    # format: !V IAREA RECTANGLE <id> <left> <top> <right> <bottom> [label]
+    # for all supported interest area commands, see the Data Viewer Manual,
+    # "Protocol for EyeLink Data to Viewer Integration"
+    scn_width, scn_height = win.size
+    left = int(scn_width/2.0) - 50
+    top = int(scn_height/2.0) - 50
+    right = int(scn_width/2.0) + 50
+    bottom = int(scn_height/2.0) + 50
+    ia_pars = (1, left, top, right, bottom, 'screen_center')
+    el_tracker.sendMessage('!V IAREA RECTANGLE %d %d %d %d %d %s' % ia_pars)
 
-# fMRI Sync Trigger
-vol = launchScan(
-    win,
-    settings = {'TR': expParams['TR'], 'volumes': expParams['volumes'], 'skip': expParams['skipSync']},
-    globalClock = globalClock,
-    mode = expParams['expMode'],
-    wait_msg = "Waiting for Sync Pulse"
-)
-
-# TRIAL LOOP
-for trial in range(expParams['nPositions']):
-    print("Trial " + str(trial) + " out of " + str(expParams['nPositions']))
-    # Initialize Trial
-    parameters = trialParams[str(trial)]
-
-    print("INITIALIZING TRIAL")
-    if parameters['saccadeInput'] == 'Mouse': eyetracker.setVisible(1)
-    
     grating.pos = parameters['gratingPos']
     grating.ori = parameters['gratingOri']
     decrements = parameters['decrements']
-    contrasts = parameters['contrasts']
+    contrast = parameters['contrast']
     response_periods = parameters['response_periods']
     
-    response_times = []
-    response_acc = []
-    response_contrast = []
-    reaction_times = []
-    detected = np.zeros(decrements.shape[0])
-
-    # ITI        
-    fixation.mask = 'cross'
-    fixation.color = 'black'
-    fixation.size = 0.5
-
-    fixation.draw()
-    win.flip()
-
-    itiClock.reset()
-    if expParams['saccadeInput'] == 'EyeLink': 
-        while itiClock.getTime() < parameters['ITIDur']:
-            get_keypress(printkey=True)
-            event.clearEvents()
-    
-    # Stimulus Presentation - Initialize trial parameters
+    # Stimulus
     lastContrastTimeSet = False
     lastContrastTime = 0
     lastContrast = 1
@@ -477,168 +528,365 @@ for trial in range(expParams['nPositions']):
     falseAlarms = 0
     fixation.mask = 'circle'
     fixation.size = 0.3
+    response_times = []
+    detected = np.zeros(decrements.shape[0])
     
     fixation.draw()
+    guide.draw()
     win.flip()
-
-    trialClock.reset()
-    
-    # Stimulus Presentation - Trial
-    if expParams['saccadeInput'] == 'EyeLink': 
-        eyetracker.sendMessage('TRIALID %s' % parameters['trialNum'])
-    while trialClock.getTime() < expParams['trialDuration']:
-        t = trialClock.getTime() * 1000 
+    stim_onsetTime = scan_clock.getTime()
+    while scan_clock.getTime() - stim_onsetTime <= parameters["trialDuration"]:
+        t = (scan_clock.getTime() - stim_onsetTime) * 1000 
 
          # If trial time is in any decrement range, 
         if ((decrements[:, 0] <=  t) & (t < decrements[:, 1])).any():
             # Decrease contrast
             grating.setPhase(0.05, '+')
-            grating.contrast = contrasts[(decrements[:, 0] <=  t) & (t < decrements[:, 1])][0]
             
             if not lastContrastTimeSet:
+                grating.contrast = parameters['contrast']
                 lastContrastTime = t
                 lastContrastTimeSet = True
                 lastContrast = grating.contrast
                 nContrasts += 1
                 
-            grating.draw()
-            fixation.draw()
-            win.flip()
-        
-        # Otherwise,
         else:
-            # No contrast manipulation
+            # Maintain contrast
             grating.setPhase(0.05, '+')
-            grating.contrast = 1
             
             if lastContrastTimeSet:
+                grating.contrast = 1
                 lastContrastTimeSet = False
                 lastContrast = 1
-                
-            grating.draw()
-            fixation.draw()
-            win.flip()
-
-        key = get_keypress(printkey=True)
-        if key:
-            response_times.append(globalClock.getTime())
-            nPressed += 1
-            response_acc = 0
-
-            if ((response_periods[:, 0] <=  t) & (t < response_periods[:, 1])).any():
-                response_acc = 1
-                detected[nContrasts - 1] = 1
-                hits += 1
             
-            else:
-                falseAlarms += 1
-            
-            contrast_data[str(nPressed)] = {
-                'trialNum': trial,
-                'nDecrements': decrements.shape[0],
-                'contrast': lastContrast,
-                'responseTimes': globalClock.getTime()*1000,
-                'responseAcc': response_acc,
-                'reactionTime': t - lastContrastTime
-            }
-            print(contrast_data[str(nPressed)].items())
-
-        event.clearEvents()
-
-    # Saccade Response 
-    SRT, sac, land_err = saccade_response(
-        parameters, eyetracker, event, fixation, win, globalClock)
-            
-    # Store trial data
-    print("Storing Data")
-    print("LE:", land_err)
-    
-    if sac:
-        saccade_data[str(trial)]['nDetected'] = np.sum(detected)
-        saccade_data[str(trial)]['nMissed'] = decrements.shape[0] - np.sum(detected)
-        saccade_data[str(trial)]['hits'] = hits
-        saccade_data[str(trial)]['falseAlarms'] = falseAlarms
-        if hits + falseAlarms != 0: 
-            saccade_data[str(trial)]['meanAccuracy'] = hits / (hits + falseAlarms)
-        else:
-            saccade_data[str(trial)]['meanAccuracy'] = 0
-#        # Saccade data
-#        saccade_data[str(trial)]['saccadePosX'] = mousePos[0]
-#        saccade_data[str(trial)]['saccadePosY'] = mousePos[1]
-#        saccade_data[str(trial)]['saccadeAng'] = mouseAng
-#        saccade_data[str(trial)]['saccadeEcc'] = mouseEcc
-#        saccade_data[str(trial)]['saccadeRT'] = mouseTime
-#        saccade_data[str(trial)]['saccadeErrorDist'] = np.linalg.norm(mousePos - parameters['gratingPos'])
-#        saccade_data[str(trial)]['saccadeErrorAng'] = angError
-#        saccade_data[str(trial)]['saccadeErrorEcc'] = mouseEcc - expParams['eccentricity']
-
-    else:
-        saccade_data[str(trial)]['nDetected'] = np.sum(detected)
-        saccade_data[str(trial)]['nMissed'] = decrements.shape[0] - np.sum(detected)
-        saccade_data[str(trial)]['hits'] = hits
-        saccade_data[str(trial)]['falseAlarms'] = falseAlarms
-        if hits + falseAlarms != 0: 
-            saccade_data[str(trial)]['meanAccuracy'] = hits / (hits + falseAlarms)
-        else:
-            saccade_data[str(trial)]['meanAccuracy'] = 0
-    
-# Post-trial delay for 6 s after last trial
-delayStart = globalClock.getTime()
-fixation.mask = 'cross'
-fixation.color = 'black'
-fixation.size = 0.5
-
-fixation.draw()
-win.flip()
-
-# If data subdir doesn't exist, create one
-subdir = os.path.join(expParams["Output Directory"], "sub-%03d" % subject)
-os.umask(0)
-if not op.exists(subdir):
-    os.makedirs(subdir, mode = 0o777)
-    
-while globalClock.getTime() - delayStart < 6:
-    pass
-
-
-# Save data to files
-saccades_filename = subdir + '/sub-%03d_saccades_run-%s.tsv' % (subject, str(run))
-saccades_datafile = open(saccades_filename, 'w')
-saccades_datafile.write("\t".join(map(str, list(saccade_data[str(0)].keys()))))
-for trial in range(expParams['nPositions']):
-    saccades_datafile.write("\n" + "\t".join(
-        map(str, list(saccade_data[str(trial)].values()))))
+        guide.draw()
+        grating.draw()
+        fixation.draw()
+        win.flip()
         
-saccades_datafile.close()
+        for keycode, modifier in event.getKeys(modifiers=True):
+            # Terminate the task if Ctrl-c
+            if keycode == 'c' and (modifier['ctrl'] is True):
+                el_tracker.sendMessage('terminated_by_user')
+                terminate_task(win, session_folder, edf_file, genv)
+            # If 1, 2, 3, 4 was pressed, record response
+            if keycode in ['1', '2', '3', '4']:
+                response_times.append(scan_clock.getTime())
+                nPressed += 1
+                response_acc = 0
 
-contrast_filename = subdir + '/sub-%03d_contrast_run-%s.tsv' % (subject, str(run))
-contrast_datafile = open(contrast_filename, 'w')
-contrast_datafile.write("\t".join(map(str, list(contrast_data[str(0)].keys()))))
-for n in range(nPressed+1):
-    contrast_datafile.write("\n" + "\t".join(
-        map(str, list(contrast_data[str(n)].values()))))
-
-contrast_datafile.close()
-
-if expParams['saccadeInput'] == 'EyeLink':
-    eyetracker = pylink.getEYELINK()
-    eyetracker.stopRecording()
-    eyetracker.closeDataFile()
-    eyetracker.setOfflineMode()
-    eyetracker.sendCommand('clear_screen 0')
-    pylink.msecDelay(500)
+                if ((response_periods[:, 0] <=  t) & (t < response_periods[:, 1])).any():
+                    response_acc = 1
+                    detected[nContrasts - 1] = 1
+                    hits += 1
+                
+                else:
+                    falseAlarms += 1
+                
+                contrast_data[str(nPressed)] = {
+                    'trialNum': trial_index,
+                    'nDecrements': decrements.shape[0],
+                    'contrast': lastContrast,
+                    'responseTimes': round(scan_clock.getTime()*1000),
+                    'responseAcc': response_acc,
+                    'reactionTime': round(t - lastContrastTime)
+                }
     
-    eyetracker.close()
+    # Saccade Response
+    if expParams['saccadeType'] == 'Saccade':
+        fixation.color = 'green'
+    else:
+        fixation.color = 'red'
+
+    fixation.draw()
+    guide.draw()
+    win.flip()
+    
+    got_sac = False
+    sac_start_time = -1
+    SRT = -1  # initialize a variable to store saccadic reaction time (SRT)
+    land_err = -1  # landing error of the saccade
+    acc = 0  # hit the correct region or not
+
+    event.clearEvents()  # clear all cached events if there are any
+    sacc_onsetTime = scan_clock.getTime()
+    while scan_clock.getTime() - sacc_onsetTime <= parameters["saccadeDuration"]:
+        # abort the current trial if the tracker is no longer recording
+        error = el_tracker.isRecording()
+        if error is not pylink.TRIAL_OK:
+            el_tracker.sendMessage('tracker_disconnected')
+            abort_trial(win, genv)
+            return error
+
+        # check for keyboard events
+        for keycode, modifier in event.getKeys(modifiers=True):
+            # Terminate the task if Ctrl-c
+            if keycode == 'c' and (modifier['ctrl'] is True):
+                el_tracker.sendMessage('terminated_by_user')
+                terminate_task(win, session_folder, edf_file, genv)
+                return pylink.ABORT_EXPT
+
+        # grab the events in the buffer, for more details,
+        # see the example script "link_event.py"
+        eye_ev = el_tracker.getNextData()
+        if (eye_ev is not None) and (eye_ev == pylink.ENDSACC):
+            eye_dat = el_tracker.getFloatData()
+            if eye_dat.getEye() == eye_used:
+                sac_amp = eye_dat.getAmplitude()  # amplitude
+                sac_start_time = eye_dat.getStartTime()  # onset time
+                sac_end_time = eye_dat.getEndTime()  # offset time
+                sac_start_pos = eye_dat.getStartGaze()  # start position
+                sac_end_pos = eye_dat.getEndGaze()  # end position
+
+                # a saccade was initiated
+                if sac_start_time <= sacc_onsetTime:
+                    sac_start_time = -1
+                    pass  # ignore saccades occurred before target onset
+                elif hypot(sac_amp[0], sac_amp[1]) > 1.5:
+                    # log a message to mark the time at which a saccadic
+                    # response occurred; note that, here we are detecting a
+                    # saccade END event; the saccade actually occurred some
+                    # msecs ago. The following message has an additional
+                    # time offset, so Data Viewer knows when exactly the
+                    # "saccade_resp" event actually happened
+                    offset = int(el_tracker.trackerTime()-sac_start_time)
+                    sac_response_msg = '{} saccade_resp'.format(offset)
+                    el_tracker.sendMessage(sac_response_msg)
+                    SRT = sac_start_time - sacc_onsetTime
+                    disp_coords(win, mon, sac_end_pos, grating, expParams['use_retina'])
+                    
+    # ITI        
+    fixation.mask = 'cross'
+    fixation.color = 'black'
+    fixation.size = 0.5
+
+    fixation.draw()
+    guide.draw()
+    win.flip()
+
+    iti_onsetTime = scan_clock.getTime()
+    while scan_clock.getTime() - iti_onsetTime <= parameters["ITIDur"]:
+        # check for keyboard events
+        for keycode, modifier in event.getKeys(modifiers=True):
+            # Terminate the task if Ctrl-c
+            if keycode == 'c' and (modifier['ctrl'] is True):
+                el_tracker.sendMessage('terminated_by_user')
+                terminate_task(win, session_folder, edf_file, genv)
+                
+
+    # send a 'TRIAL_RESULT' message to mark the end of trial, see Data
+    # Viewer User Manual, "Protocol for EyeLink Data to Viewer Integration"
+    el_tracker.sendMessage('TRIAL_RESULT %d' % pylink.TRIAL_OK)
+    return SRT, land_err, contrast_data, nPressed, stim_onsettime, sacc_onsetTime, iti_onsettime
 
 
-print("EXP END")
-win.close()
+def write_data(contrast_data, expParams, session_folder, nPressed, timestr, design_filename, onsettimes):
+    contrast_filename = session_folder + '/sub-wlsubj%03d_run-%02d_%s_contrast.tsv' % (expParams['Subject'], expParams['Run'], timestr)
+    contrast_datafile = open(contrast_filename, 'w')
+    
+    if nPressed > 0:
+        contrast_datafile.write("\t".join(map(str, list(contrast_data[str(0)].keys()))))
+        print("HEADER CONT:", "\t".join(map(str, list(contrast_data[str(0)].keys()))))
+        
+        for n in range(nPressed + 1):
+            contrast_datafile.write("\n" + "\t".join(
+                map(str, list(contrast_data[str(n)].values()))))
+    else:
+        print("NO CONTRAST DATA FOUND - nPressed == 0")
+        
+    design = pd.read_tsv(design_filenames, sep = '\t', header=True)
+    design['stim_onset'] = onsettimes['stim_onset']
+    design['sacc_onset'] = onsettimes['sacc_onset']
+    design['iti_onset'] = onsettimes['iti_onset']
+    design.to_csv(design_filename, sep = '\t', header=True)
+    
+    contrast_datafile.close()
+    
 
-eyetracker = pylink.EyeLink('100.1.1.1')
-eyetracker.open()
-receiveEDF(eyetracker, expParams['Output Directory'], subject, run)
+def run_experiment(expParams):
+    # Add current time
+    expParams['dateStr'] = data.getDateStr()
 
-core.quit()
+    # Present parameter dialog
+    dlg = gui.DlgFromDict(expParams, title = 'Perception Pilot', fixed = [
+        'Screen Distance', 'Screen Width', 'Screen Resolution',
+        'dateStr', 'TR', 'volumes', 'skipSync', 'sync', 'iti_list', 
+        'nPositions', 'max_decrements', 'Contrast', 'eccentricity', 'trialDuration',
+        'saccadeDuration', 'decrementDuration', 'responseDuration', 
+        'constantContrast'],
+        order = list(expParams.keys()))
+        
+    # INITIALIZE EXPERIMENT
+    subject = expParams['Subject']
+    run = expParams['Run']
+    
+    # Check if subject and run has already been done
+    if len(glob.glob("../design/sub-wlsubj%03d/sub-wlsubj%03d_run-%02d*" % (subject, subject, run))) != 0:
+        
+        uhoh = gui.Dlg("STOP: File exists!")
+        uhoh.addText("sub-wlsubj%03d_run-%02d files already exist, are you sure you want to continue?" % (subject, run))
+        ok_data = uhoh.show()
+        
+        if uhoh.OK:
+            print("Continuing...")
+        else:
+            print("Cancelling...")
+            core.quit()
+    
+    subdir = '../data/sub-wlsubj%03d/' % subject
+    dateStr = expParams['dateStr']
+    run = expParams['Run']
+    onsettimes = {'stim_onset': [],
+                   'sacc_onset': [],
+                   'iti_onset': []}
+    
+    # If debug flag, set debug paramters
+    if expParams['Debug']:
+        expParams['saccadeInput'] = 'Mouse'
+        expParams['expMode'] = 'Test'
+        expParams['use_retina'] = False
+        expParams['Full Screen'] = False
+        expParams['nPositions'] = 4
+        expParams['max_decrements'] = 1
+        expParams['trialDuration'] = 4
+
+    trialParams, saccade_data, timestr, design_filename = init_pilot_params(expParams)
+    contrast_data = {}
+    nPressed = -1
+
+    # Save experiment params to file
+    if dlg.OK:
+        params_filename = '../design/sub-wlsubj%03d/sub-wlsubj%03d_expParams.pickle' % (subject, subject)
+        toFile(params_filename, expParams)
+    else:
+        core.quit()
+
+    # Setup EyeLink & Window
+    el_tracker, session_folder = connect_eyelink(expParams)
+    edf_file = create_EDF(expParams, el_tracker)
+    el_tracker = configure_eyelink(expParams, el_tracker)
+    mon, win, genv = setup_graphics(expParams, el_tracker)
+    
+    # Calibrate EyeLink
+    if expParams['saccadeInput'] == 'EyeLink':
+        task_msg = 'Press ENTER to calibrate tracker'
+        #show_msg(win, task_msg, genv)
+        
+        try:
+            el_tracker.doTrackerSetup()
+        except RuntimeError as err:
+            print('ERROR:', err)
+            el_tracker.exitCalibration()
+        
+    # Create stimuli
+    if expParams['saccadeInput'] == 'Mouse': 
+        factor = 20 
+    else: 
+        factor = 1
+    grating = visual.GratingStim(
+        win, sf=2, size=3, mask='gauss', maskParams = {'sd': 4},
+        pos=[-4,0], ori=0, units = 'deg')
+    fixation = visual.TextStim(win, text='+', height=1, color=(-1, -1, -1))
+    guide = visual.Circle(win, radius = expParams['eccentricity'], lineWidth = 0.5, lineColor = 'white', units = 'deg')
+    
+    # Display instructions
+    instructions = "[PARTICIPANT] Press 1 when you detect a change in contrast. At the end of each trial, make a saccade"
+    if expParams['saccadeType'] == 'No Saccade':
+        instructions = "[PARTICIPANT] Press 1 when you detect a change in contrast. At the end of each trial, DO NOT make a saccade"
+        
+    msg = visual.TextStim(win, pos=[0, 5 * factor], text=instructions)
+
+    msg.draw()
+    fixation.draw()
+    guide.draw()
+    win.flip()
+
+    # Wait for a response
+    event.waitKeys(keyList=['0'])
+
+    # Start timing
+    scan_clock = core.Clock()
+    globalClock = core.Clock()
+    
+    el_tracker.setOfflineMode()
+
+    # Start recording, at the beginning of a new run
+    # arguments: sample_to_file, events_to_file, sample_over_link,
+    # event_over_link (1-yes, 0-no)
+    try:
+        el_tracker.startRecording(1, 1, 1, 1)
+    except RuntimeError as error:
+        print("ERROR:", error)
+        terminate_task(win, session_folder, edf_file, genv)
+
+    # Allocate some time for the tracker to cache some samples
+    pylink.pumpDelay(100)
+    
+    # Register Eye uses
+    eye_used = el_tracker.eyeAvailable()
+    print(eye_used)
+    if eye_used == 1:
+        el_tracker.sendMessage("EYE_USED 1 RIGHT")
+    elif eye_used == 0 or eye_used == 2:
+        el_tracker.sendMessage("EYE_USED 0 LEFT")
+        eye_used = 0
+    else:
+        print("Error in getting the eye information!")
+        return pylink.TRIAL_ERROR
+    
+    # fMRI Sync Trigger
+    vol = launchScan(
+        win,
+        settings = {'TR': expParams['TR'], 'volumes': expParams['volumes'], 'skip': expParams['skipSync']},
+        globalClock = globalClock,
+        mode = expParams['expMode'],
+        wait_msg = "Waiting for Sync Pulse"
+    )
+    
+    # record a message to mark the start of scanning
+    el_tracker.sendMessage('Scan_start_Run_%d' % (expParams['Run']))
+    
+    # reset the global clock to compare stimulus timing
+    # to time 0 to make sure each trial is 6-sec long
+    # this is known as "non-slip timing"
+    scan_clock.reset()
+
+    # Trial loop
+    trial_index = 0
+    for trial in range(expParams['nPositions']):
+        SRT, land_err, contrast_data, nPressed, stim_OT, sacc_OT, iti_OT = run_trial(trialParams, trial_index, 
+            scan_clock, contrast_data, win, fixation, grating, session_folder, 
+            edf_file, genv, eye_used, mon, nPressed, guide)
+        onsettimes['stim_onset'].append(stim_OT)
+        onsettimes['sacc_onset'].append(sacc_OT)
+        onsettimes['iti_onset'].append(iti_OT)
+        trial_index += 1
+        
+    # Post Trial delay (6s)
+    time = scan_clock.getTime()
+    fixation.color = 'black'
+    fixation.draw()
+    guide.draw()
+    win.flip()
+    while scan_clock.getTime() - time <= 6:
+        pass
+
+    # send a message to mark the end of a run
+    el_tracker.sendMessage('Scan_end_Run_%d' % (expParams['Run']))
+
+    # clear the screen
+    clear_screen(win, genv)
+
+    # stop recording; add 100 msec to catch final events before stopping
+    pylink.pumpDelay(100)
+    el_tracker.stopRecording()
+    
+    # Write behavioral data to folder
+    write_data(contrast_data, expParams, session_folder, nPressed, timestr, design_filename, onsettimes)
+    
+    # End
+    terminate_task(win, session_folder, edf_file, genv)
+    
 
 
-
+run_experiment(expParams)

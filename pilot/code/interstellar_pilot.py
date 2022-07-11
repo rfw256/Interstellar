@@ -23,6 +23,11 @@ from psychopy.tools.monitorunittools import posToPix, pix2deg
 from datetime import datetime
 import glob
 
+# TODO:
+'''
+- change edf name for study and retrieval
+'''
+
 
 # EXPERIMENT PARAMATERS
 expParams = {
@@ -36,21 +41,21 @@ expParams = {
     'Debug': False,
     #'Output Directory': "/Applications/EyeLink/SampleExperiments/Python/examples/Psychopy_examples/interstellar/data",
     #'Output Directory': "/Users/robwoodry/Documents/Research/Interstellar/data",
-    #'Output Directory': "/Users/winawerlab/Experiments/Interstellar/data",
-    'Output Directory': "/Users/rfw256/Documents/Research/Interstellar/data",
+    'Output Directory': "/Users/winawerlab/Experiments/Interstellar/data",
+    #'Output Directory': "/Users/rfw256/Documents/Research/Interstellar/data",
     
     # Parameters below this line will be fixed and uneditable from the dialog
     'Screen Distance': 83.5,
     'Screen Width': 64.35,
     'Screen Resolution': [1920, 1080],
     'TR': 1,
-    'volumes': 270,
+    'volumes': 280,
     'skipSync': 3,
     'sync': '5',
     'iti_list': [2.5, 3.5, 4.5, 5.5],
     'nPositions': 16,
     'max_decrements': 4,
-    'Contrast': 0.6,
+    'Contrast': 0.4,
     'eccentricity': 7,
     'trialDuration': 11.5,
     'saccadeDuration': 1,
@@ -123,7 +128,7 @@ def init_pilot_params(expParams):
         xstart = np.arange(0, 2*np.pi, 2*np.pi / expParams['nPositions'])
         xstop = xstart + 2*np.pi/expParams['nPositions']
         x = np.random.uniform(xstart, xstop)
-        positions = expParams['eccentricity'] * np.array([np.sin(x), np.cos(x)]).T 
+        positions = expParams['eccentricity'] * np.array([np.cos(x), np.sin(x)]).T 
 
         expParams['Positions'] = positions
         expParams['AnglesRadians'] = x
@@ -254,7 +259,7 @@ def connect_eyelink(expParams):
         el_tracker = pylink.EyeLink(None)
     elif expParams['saccadeInput'] == 'EyeLink':
         try:
-            el_tracker = pylink.EyeLink("100.1.1.1")
+            el_tracker = pylink.EyeLink("192.168.1.5")
         except RuntimeError as error:
             print('ERROR:', error)
             core.quit()
@@ -264,8 +269,9 @@ def connect_eyelink(expParams):
 
 
 def create_EDF(expParams, el_tracker):
-    edf_fname = "Is%02d_r%02d" % (expParams['Subject'], expParams['Run'])
+    edf_fname = "Is%03dr%02d" % (expParams['Subject'], expParams['Run'])
     edf_file = edf_fname + ".EDF"
+    print(edf_fname)
     try:
         el_tracker.openDataFile(edf_file)
     except RuntimeError as err:
@@ -320,7 +326,7 @@ def setup_graphics(expParams, el_tracker):
 #                        monitor=mon,
 #                        allowGUI = True,
 #                        units='deg')
-    mon = monitors.Monitor('testMonitor', distance = expParams['Screen Distance'], width = expParams['Screen Width'])
+    mon = monitors.Monitor('propixx', distance = expParams['Screen Distance'], width = expParams['Screen Width'])
     win = visual.Window(
         expParams['Screen Resolution'], allowGUI=True, monitor=mon, units='deg',
         fullscr = expParams['Full Screen'])
@@ -469,6 +475,19 @@ def disp_coords(win, mon, sac_end_pos, grating, retina):
 def run_trial(trial_params, trial_index, scan_clock, contrast_data, win, fixation, 
     grating, session_folder, edf_file, genv, eye_used, mon, nPressed, guide):
     parameters = trial_params[str(trial_index)]
+    
+    if trial_index == 0:
+        start_time = scan_clock.getTime()
+        fixation.mask = 'cross'
+        fixation.color = 'black'
+        fixation.size = 0.5
+
+        fixation.draw()
+        guide.draw()
+        win.flip()
+        
+        while scan_clock.getTime() - start_time <= 10:
+            pass
 
     # get a reference to the currently active EyeLink connection
     el_tracker = pylink.getEYELINK()
@@ -496,24 +515,6 @@ def run_trial(trial_params, trial_index, scan_clock, contrast_data, win, fixatio
     contrast = parameters['contrast']
     response_periods = parameters['response_periods']
     
-    # ITI        
-    fixation.mask = 'cross'
-    fixation.color = 'black'
-    fixation.size = 0.5
-
-    fixation.draw()
-    guide.draw()
-    win.flip()
-
-    iti_onsetTime = scan_clock.getTime()
-    while scan_clock.getTime() - iti_onsetTime <= parameters["ITIDur"]:
-        # check for keyboard events
-        for keycode, modifier in event.getKeys(modifiers=True):
-            # Terminate the task if Ctrl-c
-            if keycode == 'c' and (modifier['ctrl'] is True):
-                el_tracker.sendMessage('terminated_by_user')
-                terminate_task(win, session_folder, edf_file, genv)
-                
     # Stimulus
     lastContrastTimeSet = False
     lastContrastTime = 0
@@ -649,6 +650,25 @@ def run_trial(trial_params, trial_index, scan_clock, contrast_data, win, fixatio
                     el_tracker.sendMessage(sac_response_msg)
                     SRT = sac_start_time - sacc_onsetTime
                     disp_coords(win, mon, sac_end_pos, grating, expParams['use_retina'])
+                    
+    # ITI        
+    fixation.mask = 'cross'
+    fixation.color = 'black'
+    fixation.size = 0.5
+
+    fixation.draw()
+    guide.draw()
+    win.flip()
+
+    iti_onsetTime = scan_clock.getTime()
+    while scan_clock.getTime() - iti_onsetTime <= parameters["ITIDur"]:
+        # check for keyboard events
+        for keycode, modifier in event.getKeys(modifiers=True):
+            # Terminate the task if Ctrl-c
+            if keycode == 'c' and (modifier['ctrl'] is True):
+                el_tracker.sendMessage('terminated_by_user')
+                terminate_task(win, session_folder, edf_file, genv)
+                
 
     # send a 'TRIAL_RESULT' message to mark the end of trial, see Data
     # Viewer User Manual, "Protocol for EyeLink Data to Viewer Integration"
@@ -751,9 +771,9 @@ def run_experiment(expParams):
     else: 
         factor = 1
     grating = visual.GratingStim(
-        win, sf=2, size=3, mask='gauss', maskParams = {'sd': 5},
+        win, sf=2, size=3, mask='gauss', maskParams = {'sd': 4},
         pos=[-4,0], ori=0, units = 'deg')
-    fixation = visual.TextStim(win, text='+', height=2 * factor, color=(-1, -1, -1))
+    fixation = visual.TextStim(win, text='+', height=1, color=(-1, -1, -1))
     guide = visual.Circle(win, radius = expParams['eccentricity'], lineWidth = 0.5, lineColor = 'white', units = 'deg')
     
     # Display instructions
